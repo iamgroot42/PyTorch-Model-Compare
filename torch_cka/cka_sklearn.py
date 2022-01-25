@@ -2,16 +2,14 @@
     CKA-based calculations for sklearn MLPClassifier models.
 """
 
-import torch as ch
 from sklearn.neural_network import MLPClassifier
 from sklearn.neural_network._base import ACTIVATIONS
 from sklearn.utils.extmath import safe_sparse_dot
 import numpy as np
+import torch as ch
 from tqdm import tqdm
 from warnings import warn
 from typing import List, Dict
-import matplotlib.pyplot as plt
-from .utils import add_colorbar
 
 
 def collect_all_activations(model: MLPClassifier,
@@ -24,7 +22,7 @@ def collect_all_activations(model: MLPClassifier,
     :param model_layers: (List) List of layers to extract features from
     :return: (List[np.ndarray]) list of all activations
     """
-    wanted_activations = {}
+    wanted_activations = []
 
     # Initialize first layer
     activation = X
@@ -36,7 +34,7 @@ def collect_all_activations(model: MLPClassifier,
 
         # Store activation if requested
         if model_layers is None or i in model_layers:
-            wanted_activations[i] = activation
+            wanted_activations.append(activation)
         
         activation += model.intercepts_[i]
         if i != model.n_layers_ - 2:
@@ -46,7 +44,7 @@ def collect_all_activations(model: MLPClassifier,
 
     # Store activation if requested
     if model_layers is None or model.n_layers_ in model_layers:
-        wanted_activations[model.n_layers_] = activation
+        wanted_activations.append(activation)
 
     return wanted_activations
 
@@ -94,17 +92,14 @@ class CKA_sklearn:
         self.model1_info['Layers'] = []
         self.model2_info['Layers'] = []
 
-        self.model1_features = {}
-        self.model2_features = {}
-
-        if len(model1.n_layers_) > 150 and model1_layers is None:
+        if model1.n_layers_ > 150 and model1_layers is None:
             warn("Model 1 seems to have a lot of layers. " \
                  "Consider giving a list of layers whose features you are concerned with " \
                  "through the 'model1_layers' parameter. Your CPU will thank you :)")
 
         self.model1_layers = model1_layers
 
-        if len(model2.n_layers_) > 150 and model2_layers is None:
+        if model2.n_layers_ > 150 and model2_layers is None:
             warn("Model 2 seems to have a lot of layers. " \
                  "Consider giving a list of layers whose features you are concerned with " \
                  "through the 'model2_layers' parameter. Your CPU will thank you :)")
@@ -118,15 +113,16 @@ class CKA_sklearn:
         Reference: https://arxiv.org/pdf/2010.15327.pdf Eq (3)
         """
         N = K.shape[0]
-        ones = ch.ones(N, 1).cuda()
-        result = ch.trace(K @ L).cuda()
+        ones = ch.ones(N, 1, dtype=ch.float64).cuda()
+        result = ch.trace(K @ L)
         result += ((ones.t() @ K @ ones @ ones.t() @ L @ ones) / ((N - 1) * (N - 2))).item()
         result -= ((ones.t() @ K @ L @ ones) * 2 / (N - 2)).item()
         return (1 / (N * (N - 3)) * result).item()
 
     def compare(self,
                 data1: np.ndarray,
-                data2: np.ndarray = None) -> Dict:
+                data2: np.ndarray = None,
+                verbose: bool = True) -> Dict:
         """
         Computes the feature similarity between the models on the
         given data.
@@ -136,33 +132,30 @@ class CKA_sklearn:
         """
 
         if data2 is None:
-            warn("Data for Model 2 is not given. Using the same data for both models.")
             data2 = data1
 
-        self.model1_info['Dataset'] = data1.dataset.__repr__().split('\n')[0]
-        self.model2_info['Dataset'] = data2.dataset.__repr__().split('\n')[0]
+        N = len(self.model1_layers) if self.model1_layers is not None else self.model1.n_layers_
+        M = len(self.model2_layers) if self.model2_layers is not None else self.model2.n_layers_
 
-        N = len(self.model1_layers) if self.model1_layers is not None else len(list(self.model1.n_layers_))
-        M = len(self.model2_layers) if self.model2_layers is not None else len(list(self.model2.n_layers_))
-
-        hsic_matrix = ch.zeros(N, M, 3)
+        hsic_matrix = ch.zeros(N, M, 3, dtype=ch.float64)
 
         # Function to make forward pass with data and collect intermediate activations
-        self.model1_features = collect_all_activations(self.model1, data1, self.model1_layers)
-        self.model2_features = collect_all_activations(self.model2, data2, self.model2_layers)
+        model1_features = collect_all_activations(self.model1, data1, self.model1_layers)
+        model2_features = collect_all_activations(self.model2, data2, self.model2_layers)
         
-        for i, (_, feat1) in enumerate(self.model1_features.items()):
-            feat1 = feat1
-            X = feat1.flatten(1)
+        iterator = enumerate(model1_features)
+        if verbose:
+            iterator = tqdm(iterator, total=len(model1_features))
+        for i, feat1 in iterator:
+            X = ch.from_numpy(feat1).cuda()
             K = X @ X.t()
             K.fill_diagonal_(0.0)
             hsic_matrix[i, :, 0] += self._HSIC(K, K)
 
-            for j, (_, feat2) in enumerate(self.model2_features.items()):
-                feat2 = feat2
-                Y = feat2.flatten(1)
+            for j, feat2 in enumerate(model2_features):
+                Y = ch.from_numpy(feat2).cuda()
                 L = Y @ Y.t()
-                L.fill_diagonal_(0)
+                L.fill_diagonal_(0.0)
                 assert K.shape == L.shape, f"Feature shape mistach! {K.shape}, {L.shape}"
 
                 hsic_matrix[i, j, 1] += self._HSIC(K, L)
@@ -171,14 +164,13 @@ class CKA_sklearn:
         hsic_matrix = hsic_matrix[:, :, 1] / (hsic_matrix[:, :, 0].sqrt() *
                                                         hsic_matrix[:, :, 2].sqrt())
 
+        hsic_matrix = hsic_matrix.numpy()
         assert not np.isnan(hsic_matrix).any(), "HSIC computation resulted in NANs"
 
         return {
             "model1_name": self.model1_info['Name'],
             "model2_name": self.model2_info['Name'],
-            "CKA": hsic_matrix.detach().cpu().numpy(),
+            "CKA": hsic_matrix,
             "model1_layers": self.model1_info['Layers'],
-            "model2_layers": self.model2_info['Layers'],
-            "dataset1_name": self.model1_info['Dataset'],
-            "dataset2_name": self.model2_info['Dataset'],
+            "model2_layers": self.model2_info['Layers']
         }

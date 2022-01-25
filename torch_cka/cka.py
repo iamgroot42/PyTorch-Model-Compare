@@ -6,11 +6,9 @@ import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
 from tqdm import tqdm
-import gc
 from functools import partial
 from warnings import warn
 from typing import List, Dict
-import matplotlib.pyplot as plt
 
 
 class CKA:
@@ -82,14 +80,6 @@ class CKA:
 
         self.model1.eval()
         self.model2.eval()
-    
-    def __del__(self):
-        del self.model1
-        del self.model2
-        del self.model1_features
-        del self.model2_features
-        del self.model1_info
-        del self.model2_info
 
     def _log_layer(self,
                    model: str,
@@ -101,10 +91,10 @@ class CKA:
         # Store activations on CPU
         # Shift to desired device as and when needed
         if model == "model1":
-            self.model1_features[name] = out.detach() #.cpu()
+            self.model1_features[name] = out.detach()
 
         elif model == "model2":
-            self.model2_features[name] = out.detach().cpu()
+            self.model2_features[name] = out.detach()
         else:
             raise RuntimeError("Unknown model name for _log_layer.")
 
@@ -156,7 +146,6 @@ class CKA:
         """
 
         if dataloader2 is None:
-            warn("Dataloader for Model 2 is not given. Using the same dataloader for both models.")
             dataloader2 = dataloader1
 
         self.model1_info['Dataset'] = dataloader1.dataset.__repr__().split('\n')[0]
@@ -183,7 +172,6 @@ class CKA:
 
             for i, key1 in enumerate(list(self.model1_features.keys())):
                 feat1 = self.model1_features[key1]
-                # feat1 = feat1.to(self.device)
                 X = feat1.flatten(1)
                 K = X @ X.t()
                 K.fill_diagonal_(0.0)
@@ -191,7 +179,6 @@ class CKA:
 
                 for j, key2 in enumerate(list(self.model2_features.keys())):
                     feat2 = self.model2_features[key2]
-                    feat2 = feat2.to(self.device)
                     Y = feat2.flatten(1)
                     L = Y @ Y.t()
                     L.fill_diagonal_(0)
@@ -200,12 +187,8 @@ class CKA:
                     hsic_matrix[i, j, 1] += self._HSIC(K, L) / num_batches
                     hsic_matrix[i, j, 2] += self._HSIC(L, L) / num_batches
 
-                # Idea to make faster- keep on GPU, just delete
-                # feat2 from model2_features after it has been used
+                # Small addition to use less memory
                 del self.model1_features[key1]
-
-            # Memory leak when using self to register hooks: 
-            gc.collect()
 
         hsic_matrix = hsic_matrix[:, :, 1] / (hsic_matrix[:, :, 0].sqrt() *
                                                         hsic_matrix[:, :, 2].sqrt())
@@ -215,7 +198,7 @@ class CKA:
         return {
             "model1_name": self.model1_info['Name'],
             "model2_name": self.model2_info['Name'],
-            "CKA": hsic_matrix.detach().cpu().numpy(),
+            "CKA": hsic_matrix.numpy(),
             "model1_layers": self.model1_info['Layers'],
             "model2_layers": self.model2_info['Layers'],
             "dataset1_name": self.model1_info['Dataset'],
