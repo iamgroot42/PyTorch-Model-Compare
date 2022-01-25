@@ -1,12 +1,16 @@
+"""
+    CKA-based calculations for PyTorch models.
+"""
+
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
 from tqdm import tqdm
+import gc
 from functools import partial
 from warnings import warn
 from typing import List, Dict
 import matplotlib.pyplot as plt
-from .utils import add_colorbar
 
 
 class CKA:
@@ -78,6 +82,14 @@ class CKA:
 
         self.model1.eval()
         self.model2.eval()
+    
+    def __del__(self):
+        del self.model1
+        del self.model2
+        del self.model1_features
+        del self.model2_features
+        del self.model1_info
+        del self.model2_info
 
     def _log_layer(self,
                    model: str,
@@ -86,12 +98,13 @@ class CKA:
                    inp: torch.Tensor,
                    out: torch.Tensor):
 
+        # Store activations on CPU
+        # Shift to desired device as and when needed
         if model == "model1":
-            self.model1_features[name] = out
+            self.model1_features[name] = out.detach() #.cpu()
 
         elif model == "model2":
-            self.model2_features[name] = out
-
+            self.model2_features[name] = out.detach().cpu()
         else:
             raise RuntimeError("Unknown model name for _log_layer.")
 
@@ -113,7 +126,6 @@ class CKA:
                     self.model2_info['Layers'] += [name]
                     layer.register_forward_hook(partial(self._log_layer, "model2", name))
             else:
-
                 self.model2_info['Layers'] += [name]
                 layer.register_forward_hook(partial(self._log_layer, "model2", name))
 
@@ -132,13 +144,15 @@ class CKA:
 
     def compare(self,
                 dataloader1: DataLoader,
-                dataloader2: DataLoader = None) -> None:
+                dataloader2: DataLoader = None,
+                verbose: bool = True) -> Dict:
         """
         Computes the feature similarity between the models on the
         given datasets.
         :param dataloader1: (DataLoader)
         :param dataloader2: (DataLoader) If given, model 2 will run on this
                             dataset. (default = None)
+        :param verbose: (bool) If True, prints out progress bar. (default = True)
         """
 
         if dataloader2 is None:
@@ -151,70 +165,59 @@ class CKA:
         N = len(self.model1_layers) if self.model1_layers is not None else len(list(self.model1.modules()))
         M = len(self.model2_layers) if self.model2_layers is not None else len(list(self.model2.modules()))
 
-        self.hsic_matrix = torch.zeros(N, M, 3)
+        hsic_matrix = torch.zeros(N, M, 3)
 
-        num_batches = min(len(dataloader1), len(dataloader1))
+        num_batches = min(len(dataloader1), len(dataloader2))
 
-        for (x1, *_), (x2, *_) in tqdm(zip(dataloader1, dataloader2), desc="| Comparing features |", total=num_batches):
+        iterator = zip(dataloader1, dataloader2)
+        if verbose:
+            iterator = tqdm(iterator, desc="| Comparing features |", total=num_batches)
+        for (x1, *_), (x2, *_) in iterator:
 
             self.model1_features = {}
             self.model2_features = {}
+            # Function to make a forward pass with data
+            # Hooks will make sure we can access itnermediate activations
             _ = self.model1(x1.to(self.device))
             _ = self.model2(x2.to(self.device))
 
-            for i, (name1, feat1) in enumerate(self.model1_features.items()):
+            for i, key1 in enumerate(list(self.model1_features.keys())):
+                feat1 = self.model1_features[key1]
+                # feat1 = feat1.to(self.device)
                 X = feat1.flatten(1)
                 K = X @ X.t()
                 K.fill_diagonal_(0.0)
-                self.hsic_matrix[i, :, 0] += self._HSIC(K, K) / num_batches
+                hsic_matrix[i, :, 0] += self._HSIC(K, K) / num_batches
 
-                for j, (name2, feat2) in enumerate(self.model2_features.items()):
+                for j, key2 in enumerate(list(self.model2_features.keys())):
+                    feat2 = self.model2_features[key2]
+                    feat2 = feat2.to(self.device)
                     Y = feat2.flatten(1)
                     L = Y @ Y.t()
                     L.fill_diagonal_(0)
                     assert K.shape == L.shape, f"Feature shape mistach! {K.shape}, {L.shape}"
 
-                    self.hsic_matrix[i, j, 1] += self._HSIC(K, L) / num_batches
-                    self.hsic_matrix[i, j, 2] += self._HSIC(L, L) / num_batches
+                    hsic_matrix[i, j, 1] += self._HSIC(K, L) / num_batches
+                    hsic_matrix[i, j, 2] += self._HSIC(L, L) / num_batches
 
-        self.hsic_matrix = self.hsic_matrix[:, :, 1] / (self.hsic_matrix[:, :, 0].sqrt() *
-                                                        self.hsic_matrix[:, :, 2].sqrt())
+                # Idea to make faster- keep on GPU, just delete
+                # feat2 from model2_features after it has been used
+                del self.model1_features[key1]
 
-        assert not torch.isnan(self.hsic_matrix).any(), "HSIC computation resulted in NANs"
+            # Memory leak when using self to register hooks: 
+            gc.collect()
 
-    def export(self) -> Dict:
-        """
-        Exports the CKA data along with the respective model layer names.
-        :return:
-        """
+        hsic_matrix = hsic_matrix[:, :, 1] / (hsic_matrix[:, :, 0].sqrt() *
+                                                        hsic_matrix[:, :, 2].sqrt())
+
+        assert not torch.isnan(hsic_matrix).any(), "HSIC computation resulted in NANs"
+
         return {
             "model1_name": self.model1_info['Name'],
             "model2_name": self.model2_info['Name'],
-            "CKA": self.hsic_matrix,
+            "CKA": hsic_matrix.detach().cpu().numpy(),
             "model1_layers": self.model1_info['Layers'],
             "model2_layers": self.model2_info['Layers'],
             "dataset1_name": self.model1_info['Dataset'],
             "dataset2_name": self.model2_info['Dataset'],
-
         }
-
-    def plot_results(self,
-                     save_path: str = None,
-                     title: str = None):
-        fig, ax = plt.subplots()
-        im = ax.imshow(self.hsic_matrix, origin='lower', cmap='magma')
-        ax.set_xlabel(f"Layers {self.model2_info['Name']}", fontsize=15)
-        ax.set_ylabel(f"Layers {self.model1_info['Name']}", fontsize=15)
-
-        if title is not None:
-            ax.set_title(f"{title}", fontsize=18)
-        else:
-            ax.set_title(f"{self.model1_info['Name']} vs {self.model2_info['Name']}", fontsize=18)
-
-        add_colorbar(im)
-        plt.tight_layout()
-
-        if save_path is not None:
-            plt.savefig(save_path, dpi=300)
-
-        plt.show()

@@ -82,6 +82,9 @@ This can also be quite useful in studying the performance of a model on downstre
 ![alt text](assets/VOC-comparison.png "Comparing Imagenet and VOC datasets")
 
 
+## scikit-learn support
+This fork of the package also provides a scikit-learn compatible interface, specifically for MLPClassifier. The module is available under `cka_sklearn` and has a similar structure.
+
 ## Tips
 - If your model is large (lots of layers or large feature maps), try to extract from select layers. This is to avoid out of memory issues. 
 - If you still want to compare the entire feature map, you can run it multiple times with few layers at each iteration and export your data using `cka.export()`. The exported data can then be concatenated to produce the full CKA matrix.
@@ -95,10 +98,10 @@ If you use this repo in your project or research, please cite as  -
 
 ```
 @software{subramanian2021torch_cka,
-    author={Anand Subramanian},
+    author={Anand Subramanian, Anshuman Suri},
     title={torch_cka},
-    url={https://github.com/AntixK/PyTorch-Model-Compare},
-    year={2021}
+    url={https://github.com/iamgroot42/PyTorch-Model-Compare},
+    year={2022}
 }
 ```
 

@@ -5,15 +5,15 @@ with open("README.md", "r", encoding="utf-8") as fh:
 
 setuptools.setup(
     name="torch_cka",
-    version="0.21",
-    author="Anand K Subramanian",
-    author_email="anandkrish894@gmail.com",
+    version="1.0",
+    author="Anand K Subramanian, Anshuman Suri",
+    author_email="anandkrish894@gmail.com, anshuman@virginia.edu",
     description="A package to compare neural networks by their feature similarity",
     long_description=long_description,
     long_description_content_type="text/markdown",
-    url="https://github.com/AntixK/PyTorch-Model-Compare",
+    url="https://github.com/iamgroot42/PyTorch-Model-Compare",
     project_urls={
-        "Bug Tracker": "https://github.com/AntixK/PyTorch-Model-Compare/issues",
+        "Bug Tracker": "https://github.com/iamgroot42/PyTorch-Model-Compare/issues",
     },
     classifiers=[
         "Programming Language :: Python :: 3",
@@ -22,5 +22,5 @@ setuptools.setup(
     ],
     package_dir={"": "."},
     packages=setuptools.find_packages(),
-    python_requires=">=3.7",
+    python_requires=">=3.6",
 )
